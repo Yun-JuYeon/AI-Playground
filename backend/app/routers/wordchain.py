@@ -8,8 +8,9 @@ from ..services.wordchain_service import (
     clear_wordchain,
     get_wordchain_history,
     save_game_to_history,
+    delete_wordchain_history_item,
     get_ai_word,
-    validate_user_word,
+    validate_user_word_async,
     validate_ai_word
 )
 from ..core.utils import get_last_char
@@ -30,6 +31,15 @@ async def get_game_history(username: str):
     """Get past game history for sidebar"""
     history = await get_wordchain_history(username)
     return {"history": history}
+
+
+@router.delete("/api/wordchain/history/{username}/{index}")
+async def delete_game_history(username: str, index: int):
+    """Delete a specific game from history"""
+    success = await delete_wordchain_history_item(username, index)
+    if success:
+        return {"success": True}
+    return {"success": False, "message": "기록을 찾을 수 없습니다."}
 
 
 @router.websocket("/ws/wordchain/{username}/{difficulty}")
@@ -83,12 +93,29 @@ async def wordchain_endpoint(websocket: WebSocket, username: str, difficulty: in
                 })
                 continue
 
-            # Validate user's word
-            is_valid, error_msg = validate_user_word(word, used_words, last_word)
+            # Validate user's word (with dictionary check)
+            is_valid, error_msg = await validate_user_word_async(word, used_words, last_word)
             if not is_valid:
-                await websocket.send_json({
-                    "type": "system",
-                    "message": error_msg,
+                # 사용자가 잘못된 단어를 입력하면 패배
+                game_over_msg = {
+                    "type": "game_over",
+                    "message": f"💔 패배! {error_msg} 최종 점수: {score}점",
+                    "timestamp": timestamp
+                }
+                await websocket.send_json(game_over_msg)
+                wc_messages.append(game_over_msg)
+                is_game_over = True
+                game_state = {"used_words": used_words, "score": score, "is_game_over": True, "difficulty": difficulty}
+                await save_wordchain_game(username, game_state)
+                await save_wordchain_messages(username, wc_messages)
+
+                # Save to history as loss
+                await save_game_to_history(username, {
+                    "score": score,
+                    "difficulty": difficulty,
+                    "words_count": len(used_words),
+                    "words": used_words,
+                    "result": "lose",
                     "timestamp": timestamp
                 })
                 continue

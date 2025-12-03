@@ -179,7 +179,7 @@
 .text {
   padding: 12px 18px;
   border-radius: 20px;
-  max-width: 65%;
+  max-width: 80%;
   word-wrap: break-word;
   line-height: 1.5;
 }
@@ -252,6 +252,26 @@
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
   text-align: center;
   min-width: 500px;
+  position: relative;
+}
+
+.box-logout-btn {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  background: white;
+  color: #e57373;
+  border: 1px solid #e57373;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.box-logout-btn:hover {
+  background: #ffebee;
 }
 
 .mode-select-box h1 {
@@ -864,10 +884,40 @@
   border-radius: 10px;
   padding: 12px;
   margin-bottom: 8px;
+  position: relative;
 }
 
 .wc-history-item:hover {
   background: #f5f5f5;
+}
+
+.wc-history-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: #e0e0e0;
+  color: #888;
+  border-radius: 50%;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wc-history-item:hover .wc-history-delete {
+  opacity: 1;
+}
+
+.wc-history-delete:hover {
+  background: #e57373;
+  color: white;
 }
 
 .wc-history-result {
@@ -919,11 +969,43 @@
 /* 상단 바 */
 .wc-top-bar {
   display: flex;
-  justify-content: flex-start;
+  justify-content: space-between;
   align-items: center;
   padding: 14px 24px;
   background: rgba(255,255,255,0.7);
   border-bottom: 1px solid #e8e8e8;
+}
+
+.wc-top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.wc-user-badge {
+  font-size: 14px;
+  color: #666;
+  background: white;
+  padding: 10px 18px;
+  border-radius: 20px;
+  border: 1px solid #e0e0e0;
+}
+
+.wc-logout-btn {
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  background: white;
+  color: #e57373;
+  border: 1px solid #e57373;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.wc-logout-btn:hover {
+  background: #ffebee;
 }
 
 .wc-back-btn {
@@ -1115,6 +1197,26 @@
 @keyframes fadeIn {
   0% { opacity: 0; transform: scale(0.95); }
   100% { opacity: 1; transform: scale(1); }
+}
+
+/* 에러 메시지 */
+.wc-error-message {
+  background: linear-gradient(135deg, #fff0f0 0%, #ffe8e8 100%);
+  color: #d32f2f;
+  padding: 12px 24px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  border: 1px solid #ffcdd2;
+  animation: shakeIn 0.4s ease-out;
+}
+
+@keyframes shakeIn {
+  0% { opacity: 0; transform: translateX(-10px); }
+  25% { transform: translateX(8px); }
+  50% { transform: translateX(-6px); }
+  75% { transform: translateX(4px); }
+  100% { opacity: 1; transform: translateX(0); }
 }
 
 /* 입력 영역 */
@@ -1338,7 +1440,7 @@
 
 .chat-sidebar-header {
   padding: 20px 16px;
-  background: linear-gradient(135deg, #d4edfc 0%, #fce4ec 100%);
+  background: linear-gradient(135deg, #e8f4fc 0%, #fce8ef 100%);
   border-bottom: 1px solid #e8e8e8;
 }
 
@@ -1369,10 +1471,53 @@
   margin-bottom: 8px;
   cursor: pointer;
   transition: background 0.2s;
+  position: relative;
 }
 
 .chat-history-item:hover {
   background: #f0f0f0;
+}
+
+.chat-history-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: #e0e0e0;
+  color: #888;
+  border-radius: 50%;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-history-item:hover .chat-history-delete {
+  opacity: 1;
+}
+
+.chat-history-delete:hover {
+  background: #e57373;
+  color: white;
+}
+
+.chat-history-item.current {
+  background: linear-gradient(135deg, #e8f4fc 0%, #fce8ef 100%);
+  border: 1px solid #d4edfc;
+}
+
+.chat-history-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #7bb;
+  margin-bottom: 4px;
+  text-transform: uppercase;
 }
 
 .chat-history-preview {
@@ -1417,25 +1562,83 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 18px 28px;
-  background: linear-gradient(135deg, #7ec8e3 0%, #8fd3c4 50%, #f8b4c4 100%);
-  color: white;
+  padding: 14px 24px;
+  background: linear-gradient(135deg, #e8f4fc 0%, #fff5e6 50%, #fce8ef 100%);
+  border-bottom: 1px solid #e8e8e8;
 }
 
-.chat-main-area .back-btn {
-  background: rgba(255, 255, 255, 0.2);
-  border: none;
-  color: white;
+.chat-main-area .chat-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #555;
+}
+
+.chat-back-btn {
+  background: white;
+  border: 1px solid #ddd;
+  color: #666;
   font-size: 14px;
-  padding: 8px 16px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  min-width: 100px;
+  text-align: center;
+}
+
+.chat-back-btn:hover {
+  background: #f5f5f5;
+  border-color: #ccc;
+}
+
+.chat-user-badge {
+  font-size: 14px;
+  color: #666;
+  background: white;
+  padding: 10px 18px;
+  border-radius: 20px;
+  border: 1px solid #e0e0e0;
+}
+
+.chat-new-btn {
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  background: white;
+  color: #7bb;
+  border: 1px solid #7bb;
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s ease;
   white-space: nowrap;
 }
 
-.chat-main-area .back-btn:hover {
-  background: rgba(255, 255, 255, 0.3);
+.chat-new-btn:hover {
+  background: #e8f4fc;
+}
+
+.chat-new-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.chat-logout-btn {
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  background: white;
+  color: #e57373;
+  border: 1px solid #e57373;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.chat-logout-btn:hover {
+  background: #ffebee;
 }
 
 .chat-main-area .messages-container {

@@ -23,10 +23,11 @@ function App() {
   const [gameHistory, setGameHistory] = useState([]);
   const [selectedGame, setSelectedGame] = useState(null);
   const wordListRef = useRef(null);
+  const [wcErrorMessage, setWcErrorMessage] = useState('');
 
   // 채팅 히스토리 상태
   const [chatSessions, setChatSessions] = useState([]);
-  const [selectedChat, setSelectedChat] = useState(null);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -64,6 +65,7 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         setChatSessions(data.sessions || []);
+        setCurrentSessionId(data.current_id || null);
       }
     } catch (error) {
       console.error('Failed to fetch chat sessions:', error);
@@ -110,7 +112,13 @@ function App() {
     setGameHistory([]);
     setSelectedGame(null);
     setChatSessions([]);
-    setSelectedChat(null);
+    setCurrentSessionId(null);
+  };
+
+  const logout = () => {
+    goBack();
+    setUsername('');
+    setIsJoined(false);
   };
 
   const connectChat = () => {
@@ -118,8 +126,15 @@ function App() {
     websocket.onopen = () => console.log('Chat connected');
     websocket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === 'history') setMessages(data.messages);
-      else setMessages((prev) => [...prev, data]);
+      if (data.type === 'session_info') {
+        setCurrentSessionId(data.session_id);
+      } else if (data.type === 'history') {
+        setMessages(data.messages);
+      } else if (data.type === 'session_updated') {
+        fetchChatSessions();
+      } else if (data.type === 'message' || data.type === 'system') {
+        setMessages((prev) => [...prev, data]);
+      }
     };
     websocket.onclose = () => console.log('Chat disconnected');
     setWs(websocket);
@@ -138,7 +153,12 @@ function App() {
         fetchGameHistory();
       } else if (data.type === 'score') {
         setScore(data.score);
+      } else if (data.type === 'system') {
+        // 에러 메시지 표시
+        setWcErrorMessage(data.message);
+        setTimeout(() => setWcErrorMessage(''), 3000);
       } else if (data.type === 'message') {
+        setWcErrorMessage(''); // 성공하면 에러 메시지 클리어
         const newWord = { word: data.message, isUser: data.username !== 'AI' };
         setWordList((prev) => [...prev, newWord]);
         setCurrentWord(data.message);
@@ -162,11 +182,10 @@ function App() {
     setMessage('');
   };
 
-  const clearChat = async () => {
-    if (!window.confirm('대화 기록을 모두 삭제하고 새로 시작할까요?')) return;
+  const startNewChat = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/clear/' + username, { method: 'POST' });
+      const response = await fetch('http://localhost:8000/api/chat/new/' + username, { method: 'POST' });
       if (response.ok) {
         setMessages([]);
         if (ws) ws.close();
@@ -174,10 +193,49 @@ function App() {
         setTimeout(() => connectChat(), 100);
       }
     } catch (error) {
-      console.error('Failed to clear chat:', error);
-      alert('대화 초기화에 실패했습니다.');
+      console.error('Failed to create new chat:', error);
     }
     setIsLoading(false);
+  };
+
+  const switchChatSession = async (sessionId) => {
+    if (sessionId === currentSessionId) return;
+    setIsLoading(true);
+    try {
+      const response = await fetch(`http://localhost:8000/api/chat/switch/${username}/${sessionId}`, { method: 'POST' });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setMessages(data.messages || []);
+          setCurrentSessionId(sessionId);
+          if (ws) ws.close();
+          setTimeout(() => connectChat(), 100);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to switch session:', error);
+    }
+    setIsLoading(false);
+  };
+
+  const deleteChatSession = async (e, sessionId) => {
+    e.stopPropagation();
+    if (!window.confirm('이 대화를 삭제할까요?')) return;
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/chat/session/${username}/${sessionId}`, { method: 'DELETE' });
+      if (response.ok) {
+        await fetchChatSessions();
+        // 현재 세션이 삭제되었으면 다른 세션으로 전환하거나 새로 시작
+        if (sessionId === currentSessionId) {
+          setMessages([]);
+          if (ws) ws.close();
+          setTimeout(() => connectChat(), 100);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to delete session:', error);
+    }
   };
 
   const restartWordChain = async () => {
@@ -195,6 +253,25 @@ function App() {
     } catch (error) {
       console.error('Failed to restart game:', error);
       alert('게임 재시작에 실패했습니다.');
+    }
+  };
+
+  const deleteGameHistory = async (e, index) => {
+    e.stopPropagation();
+    if (!window.confirm('이 게임 기록을 삭제할까요?')) return;
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/wordchain/history/${username}/${index}`, { method: 'DELETE' });
+      if (response.ok) {
+        await fetchGameHistory();
+        if (selectedGame === index) {
+          setSelectedGame(null);
+        } else if (selectedGame !== null && selectedGame > index) {
+          setSelectedGame(selectedGame - 1);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to delete game history:', error);
     }
   };
 
@@ -246,6 +323,7 @@ function App() {
       <div className="join-container">
         <div className="difficulty-select-box">
           <button className="diff-back-btn" onClick={() => setShowDifficultySelect(false)}>←</button>
+          <button className="box-logout-btn" onClick={logout}>로그아웃</button>
           <h1>난이도 선택</h1>
           <p className="diff-subtitle">AI의 실력을 선택하세요!</p>
           <div className="difficulty-options">
@@ -273,6 +351,7 @@ function App() {
     return (
       <div className="join-container">
         <div className="mode-select-box">
+          <button className="box-logout-btn" onClick={logout}>로그아웃</button>
           <h1>무엇을 할까요?</h1>
           <p className="welcome-text">{username}님, 환영합니다!</p>
           <div className="mode-buttons">
@@ -305,17 +384,24 @@ function App() {
             {chatSessions.length === 0 ? (
               <div className="chat-no-history">아직 기록이 없어요!</div>
             ) : (
-              chatSessions.map((session, index) => (
+              chatSessions.map((session) => (
                 <div
-                  key={index}
-                  className="chat-history-item"
-                  onClick={() => setSelectedChat(selectedChat === index ? null : index)}
+                  key={session.id}
+                  className={'chat-history-item' + (session.id === currentSessionId ? ' current' : '')}
+                  onClick={() => switchChatSession(session.id)}
                 >
+                  <button
+                    className="chat-history-delete"
+                    onClick={(e) => deleteChatSession(e, session.id)}
+                  >×</button>
+                  {session.id === currentSessionId && (
+                    <div className="chat-history-label">현재 대화</div>
+                  )}
                   <div className="chat-history-preview">{session.preview}</div>
                   <div className="chat-history-info">
                     <span className="chat-history-count">{session.message_count}개 메시지</span>
                   </div>
-                  <div className="chat-history-date">{formatDate(session.timestamp)}</div>
+                  <div className="chat-history-date">{formatDate(session.updated_at)}</div>
                 </div>
               ))
             )}
@@ -326,12 +412,13 @@ function App() {
         <div className="chat-main-area">
           <div className="chat-header">
             <div className="header-left">
-              <button className="back-btn" onClick={goBack}>← 나가기</button>
+              <button className="chat-back-btn" onClick={goBack}>← 나가기</button>
               <h2>AI 채팅</h2>
             </div>
             <div className="header-actions">
-              <span className="user-status">{username}님</span>
-              <button className="clear-btn" onClick={clearChat} disabled={isLoading}>새 대화</button>
+              <span className="chat-user-badge">{username}님</span>
+              <button className="chat-new-btn" onClick={startNewChat} disabled={isLoading}>+ 새 대화</button>
+              <button className="chat-logout-btn" onClick={logout}>로그아웃</button>
             </div>
           </div>
           <div className="messages-container">
@@ -380,6 +467,10 @@ function App() {
                   className="wc-history-item"
                   onClick={() => setSelectedGame(selectedGame === index ? null : index)}
                 >
+                  <button
+                    className="wc-history-delete"
+                    onClick={(e) => deleteGameHistory(e, index)}
+                  >×</button>
                   <div className="wc-history-result">
                     {game.result === 'win' ? '🏆 승리' : '💔 패배'}
                   </div>
@@ -435,6 +526,10 @@ function App() {
           {/* 상단 헤더 */}
           <div className="wc-top-bar">
             <button className="wc-back-btn" onClick={goBack}>← 나가기</button>
+            <div className="wc-top-bar-right">
+              <span className="wc-user-badge">{username}님</span>
+              <button className="wc-logout-btn" onClick={logout}>로그아웃</button>
+            </div>
           </div>
 
           {/* 중앙 게임 영역 */}
@@ -484,6 +579,13 @@ function App() {
             {isGameOver && (
               <div className="wc-gameover-banner">
                 {gameOverMessage}
+              </div>
+            )}
+
+            {/* 에러 메시지 */}
+            {wcErrorMessage && (
+              <div className="wc-error-message">
+                ⚠️ {wcErrorMessage}
               </div>
             )}
 
