@@ -1,0 +1,116 @@
+import React, { useState, useEffect, useRef } from 'react';
+import './App.css';
+
+function App() {
+  const [username, setUsername] = useState('');
+  const [isJoined, setIsJoined] = useState(false);
+  const [message, setMessage] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [ws, setWs] = useState(null);
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const joinChat = () => {
+    if (!username.trim()) return;
+
+    const websocket = new WebSocket(`ws://localhost:8000/ws/${username}`);
+
+    websocket.onopen = () => {
+      console.log('Connected to server');
+      setIsJoined(true);
+    };
+
+    websocket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      setMessages((prev) => [...prev, data]);
+    };
+
+    websocket.onclose = () => {
+      console.log('Disconnected from server');
+      setIsJoined(false);
+    };
+
+    setWs(websocket);
+  };
+
+  const sendMessage = (e) => {
+    e.preventDefault();
+    if (!message.trim() || !ws) return;
+
+    ws.send(message);
+    setMessage('');
+  };
+
+  const formatTime = (timestamp) => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  if (!isJoined) {
+    return (
+      <div className="join-container">
+        <div className="join-box">
+          <h1>AI Chat</h1>
+          <input
+            type="text"
+            placeholder="닉네임을 입력하세요"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && joinChat()}
+          />
+          <button onClick={joinChat}>입장하기</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="chat-container">
+      <div className="chat-header">
+        <h2>AI Chat</h2>
+        <span>{username}님 접속 중</span>
+      </div>
+
+      <div className="messages-container">
+        {messages.map((msg, index) => (
+          <div
+            key={index}
+            className={`message ${msg.type === 'system' ? 'system' : msg.username === username ? 'mine' : 'others'}`}
+          >
+            {msg.type === 'system' ? (
+              <span className="system-message">{msg.message}</span>
+            ) : (
+              <>
+                {msg.username !== username && <span className="username">{msg.username}</span>}
+                <div className="message-content">
+                  <span className="text">{msg.message}</span>
+                  <span className="time">{formatTime(msg.timestamp)}</span>
+                </div>
+              </>
+            )}
+          </div>
+        ))}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <form className="input-container" onSubmit={sendMessage}>
+        <input
+          type="text"
+          placeholder="메시지를 입력하세요..."
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+        />
+        <button type="submit">전송</button>
+      </form>
+    </div>
+  );
+}
+
+export default App;
