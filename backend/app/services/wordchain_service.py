@@ -86,37 +86,42 @@ async def delete_wordchain_history_item(username: str, index: int) -> bool:
 
 async def verify_word_exists(word: str) -> tuple[bool, str]:
     """Verify if a word is a real Korean word using OpenAI"""
-    prompt = f"""'{word}'가 실제로 존재하는 한국어 단어인지 확인해주세요.
+    prompt = f"""'{word}'가 끝말잇기에서 사용할 수 있는 단어인지 확인해주세요.
 
-조건:
-1. 표준국어대사전에 등재된 명사여야 합니다
-2. 고유명사(사람 이름, 지명, 브랜드명 등)는 안 됩니다
-3. 줄임말이나 신조어는 안 됩니다
-4. 2글자 이상의 일반 명사여야 합니다
+허용되는 단어 (거의 다 허용!):
+- 일반 명사, 음식 이름, 동물, 식물
+- 브랜드명 (람보르기니, 맥도날드, 삼성, 나이키 등 OK!)
+- 지명, 나라 이름 (서울, 미국, 파리 등)
+- 외래어, 외국어 단어
+- 유명인 이름도 OK (아이유, 손흥민 등)
+- 한국에서 알려진 단어면 대부분 OK
 
-답변 형식:
-- 유효한 단어면: "YES"
-- 유효하지 않으면: "NO: 이유"
+허용 안 되는 단어:
+- 완전히 지어낸 말 (의미 없는 글자 조합)
+- 1글자 단어
 
-답변:"""
+답변: YES 또는 NO"""
 
     response = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "당신은 한국어 사전 전문가입니다. 끝말잇기에 사용 가능한 단어인지 정확히 판단합니다."},
+            {"role": "system", "content": "당신은 관대한 끝말잇기 심판입니다. 실제로 존재하거나 사람들이 아는 단어면 거의 다 허용합니다. 매우 관대하게 판단하세요."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=100,
+        max_tokens=50,
         temperature=0
     )
 
-    result = response.choices[0].message.content.strip()
+    result = response.choices[0].message.content.strip().upper()
 
-    if result.startswith("YES"):
+    # "YES"가 응답에 포함되어 있으면 유효한 단어
+    if "YES" in result:
         return True, ""
     else:
-        reason = result.replace("NO:", "").replace("NO", "").strip()
-        return False, reason if reason else "사전에 없는 단어입니다"
+        # NO인 경우 이유 추출
+        original = response.choices[0].message.content.strip()
+        reason = original.replace("NO:", "").replace("NO", "").replace("답변:", "").strip()
+        return False, reason if reason else "끝말잇기에 사용할 수 없는 단어입니다"
 
 
 async def get_ai_word(used_words: list[str], last_char: str, difficulty: int) -> str:
