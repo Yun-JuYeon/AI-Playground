@@ -1,5 +1,12 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import asyncio
+import json
+from collections import defaultdict
 from datetime import datetime
+
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
 from ..services.chat_service import (
     create_new_session,
     get_current_session_id,
@@ -12,6 +19,24 @@ from ..services.chat_service import (
 )
 
 router = APIRouter()
+chat_event_listeners: dict[str, list[asyncio.Queue]] = defaultdict(list)
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+def _current_messages(session: dict) -> list[dict]:
+    return session.get("messages") or []
+
+
+async def broadcast_chat_event(username: str, payload: dict):
+    listeners = list(chat_event_listeners.get(username, []))
+    for queue in listeners:
+        try:
+            await queue.put(payload)
+        except asyncio.CancelledError:
+            continue
 
 
 @router.post("/api/chat/new/{username}")
@@ -45,123 +70,112 @@ async def delete_chat_session(username: str, session_id: str):
     return {"success": True}
 
 
-@router.websocket("/ws/{username}")
-async def websocket_endpoint(websocket: WebSocket, username: str):
-    await websocket.accept()
-
-    # Get or create current session
+@router.post("/api/chat/send/{username}")
+async def send_message(username: str, request: ChatRequest):
+    """Send a message and get AI response"""
+    message = request.message
     session_id = await get_current_session_id(username)
-    session = await get_session(username, session_id)
+    if not session_id:
+        return {"error": "No active session"}
 
+    session = await get_session(username, session_id)
     if not session:
-        session_id = await create_new_session(username)
-        session = await get_session(username, session_id)
+        return {"error": "Session not found"}
+
+    user_msg = {
+        "type": "message",
+        "username": username,
+        "message": message,
+        "timestamp": datetime.now().isoformat()
+    }
+    session_messages = _current_messages(session)
+    session_messages.append(user_msg)
+    session["messages"] = session_messages
+    await save_session(username, session_id, session)
+    await broadcast_chat_event(username, user_msg)
+    await broadcast_chat_event(username, {"type": "session_updated"})
 
     conversation = session.get("conversation", [])
-    chat_messages = session.get("messages", [])
+    conversation.append({"role": "user", "content": message})
 
-    is_new_session = len(chat_messages) == 0
+    await broadcast_chat_event(username, {"type": "ai_stream_start", "timestamp": datetime.now().isoformat()})
 
-    if is_new_session:
-        welcome_msg = {
-            "type": "system",
-            "message": f"{username}님, 환영합니다! AI와 대화를 시작하세요.",
-            "timestamp": datetime.now().isoformat()
-        }
-    else:
-        welcome_msg = {
-            "type": "system",
-            "message": f"{username}님, 다시 오셨네요! 이전 대화를 이어갑니다.",
-            "timestamp": datetime.now().isoformat()
-        }
-
-    # Send current session ID first
-    await websocket.send_json({
-        "type": "session_info",
-        "session_id": session_id
-    })
-
-    await websocket.send_json(welcome_msg)
-
-    if chat_messages:
-        await websocket.send_json({
-            "type": "history",
-            "messages": chat_messages
-        })
-
+    ai_parts = []
     try:
-        while True:
-            data = await websocket.receive_text()
-            timestamp = datetime.now().isoformat()
+        async for chunk in get_ai_response_stream(conversation):
+            if not chunk:
+                continue
+            ai_parts.append(chunk)
+            await broadcast_chat_event(username, {"type": "ai_stream_chunk", "delta": chunk})
+    except Exception as exc:
+        error_msg = {
+            "type": "system",
+            "message": f"AI 응답 오류: {str(exc)}",
+            "timestamp": datetime.now().isoformat()
+        }
+        session_messages.append(error_msg)
+        session["conversation"] = conversation
+        await save_session(username, session_id, session)
+        await broadcast_chat_event(username, error_msg)
+        await broadcast_chat_event(username, {"type": "session_updated"})
+        return {"success": False, "error": str(exc)}
 
-            user_msg = {
-                "type": "message",
-                "username": username,
-                "message": data,
-                "timestamp": timestamp
-            }
+    ai_response = "".join(ai_parts).strip()
+    conversation.append({"role": "assistant", "content": ai_response})
+    session["conversation"] = conversation
 
-            await websocket.send_json(user_msg)
+    ai_msg = {
+        "type": "message",
+        "username": "AI",
+        "message": ai_response,
+        "timestamp": datetime.now().isoformat()
+    }
+    session_messages.append(ai_msg)
+    session["messages"] = session_messages
+    await save_session(username, session_id, session)
+    await broadcast_chat_event(username, {"type": "ai_stream_end", "ai_message": ai_msg})
+    await broadcast_chat_event(username, {"type": "session_updated"})
 
-            chat_messages.append(user_msg)
-            conversation.append({"role": "user", "content": data})
+    return {"success": True, "ai_message": ai_msg}
 
-            # Save session
-            session["conversation"] = conversation
-            session["messages"] = chat_messages
-            await save_session(username, session_id, session)
 
-            # Notify client to update sidebar
-            await websocket.send_json({"type": "session_updated"})
+@router.get("/api/chat/stream/{username}")
+async def stream_messages(username: str):
+    """Stream messages using SSE"""
 
-            try:
-                await websocket.send_json({"type": "ai_stream_start"})
+    async def event_generator():
+        queue = asyncio.Queue()
+        listeners = chat_event_listeners.setdefault(username, [])
+        listeners.append(queue)
 
-                ai_parts = []
-                async for chunk in get_ai_response_stream(conversation):
-                    ai_parts.append(chunk)
-                    await websocket.send_json({
-                        "type": "ai_stream_chunk",
-                        "delta": chunk
-                    })
+        def format_payload(payload: dict) -> str:
+            return f"data: {json.dumps(payload)}\n\n"
 
-                ai_message = "".join(ai_parts).strip()
+        try:
+            session_id = await get_current_session_id(username)
+            if not session_id:
+                yield format_payload({"error": "No active session"})
+                return
 
-                if not ai_message:
-                    raise RuntimeError("AI 응답이 비어 있습니다")
+            session = await get_session(username, session_id)
+            if not session:
+                yield format_payload({"error": "Session not found"})
+                return
 
-                conversation.append({"role": "assistant", "content": ai_message})
+            yield format_payload({"type": "session_info", "session_id": session_id})
+            yield format_payload({"type": "history", "messages": session.get("messages", [])})
 
-                ai_timestamp = datetime.now().isoformat()
-                ai_msg = {
-                    "type": "message",
-                    "username": "AI",
-                    "message": ai_message,
-                    "timestamp": ai_timestamp
-                }
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=25)
+                except asyncio.TimeoutError:
+                    yield format_payload({"type": "ping"})
+                    continue
 
-                chat_messages.append(ai_msg)
+                yield format_payload(payload)
+        finally:
+            listeners = chat_event_listeners.get(username)
+            if listeners and queue in listeners:
+                listeners.remove(queue)
 
-                # Save session again with AI response
-                session["conversation"] = conversation
-                session["messages"] = chat_messages
-                await save_session(username, session_id, session)
-
-                await websocket.send_json({
-                    "type": "ai_stream_end",
-                    "message": ai_message,
-                    "timestamp": ai_timestamp
-                })
-
-                # Notify client to update sidebar again
-                await websocket.send_json({"type": "session_updated"})
-
-            except Exception as e:
-                await websocket.send_json({
-                    "type": "system",
-                    "message": f"AI 응답 오류: {str(e)}",
-                    "timestamp": datetime.now().isoformat()
-                })
-
-    except WebSocketDisconnect:
-        print(f"[{username}] 연결 종료")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

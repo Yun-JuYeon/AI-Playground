@@ -2,7 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-const WS_URL = API_URL.replace(/^http/, 'ws');
+
+const getLastChar = (word = '') => {
+  if (!word) return '';
+  return word.trim().slice(-1);
+};
 
 function App() {
   const [username, setUsername] = useState('');
@@ -13,6 +17,7 @@ function App() {
   const [ws, setWs] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef(null);
+  const streamingMessageRef = useRef(null);
 
   // 끝말잇기 상태
   const [wordList, setWordList] = useState([]);
@@ -20,7 +25,6 @@ function App() {
   const [score, setScore] = useState(0);
   const [isGameOver, setIsGameOver] = useState(false);
   const [gameOverMessage, setGameOverMessage] = useState('');
-  const [wordChainWs, setWordChainWs] = useState(null);
   const [gameMessages, setGameMessages] = useState([]);
   const [difficulty, setDifficulty] = useState(3);
   const [showDifficultySelect, setShowDifficultySelect] = useState(false);
@@ -43,6 +47,86 @@ function App() {
       wordListRef.current.scrollLeft = wordListRef.current.scrollWidth;
     }
   };
+
+  const addStreamingPlaceholder = (timestamp) => {
+    const placeholderId = `streaming-${Date.now()}`;
+    streamingMessageRef.current = placeholderId;
+    const placeholder = {
+      type: 'message',
+      username: 'AI',
+      message: '',
+      timestamp,
+      isStreaming: true,
+      tempId: placeholderId
+    };
+    setMessages((prev) => [...prev, placeholder]);
+  };
+
+  const appendStreamingChunk = (delta) => {
+    const placeholderId = streamingMessageRef.current;
+    if (!placeholderId) return;
+    setMessages((prev) => prev.map((msg) => (
+      msg.tempId === placeholderId ? { ...msg, message: (msg.message || '') + delta } : msg
+    )));
+  };
+
+  const finalizeStreamingMessage = (aiMessage) => {
+    const placeholderId = streamingMessageRef.current;
+    if (placeholderId) {
+      setMessages((prev) => prev.map((msg) => {
+        if (msg.tempId !== placeholderId) return msg;
+        const updated = {
+          ...msg,
+          message: aiMessage?.message ?? msg.message,
+          timestamp: aiMessage?.timestamp ?? msg.timestamp,
+          isStreaming: false
+        };
+        delete updated.tempId;
+        return updated;
+      }));
+      streamingMessageRef.current = null;
+      return;
+    }
+
+    if (aiMessage) {
+      setMessages((prev) => [...prev, aiMessage]);
+    }
+  };
+
+  const applyChainMessages = (messagesArray, mode = gameMode) => {
+    if (!messagesArray || messagesArray.length === 0) return;
+
+    setGameMessages((prev) => [...prev, ...messagesArray]);
+
+    const wordsToAdd = [];
+    let latestWord = null;
+
+    messagesArray.forEach((msg) => {
+      if (msg.type === 'system' && msg.message) {
+        setWcErrorMessage(msg.message);
+        setTimeout(() => setWcErrorMessage(''), 3000);
+      }
+
+      if (msg.type === 'message') {
+        const cleanWord = msg.message || '';
+        const isUserMessage = msg.username !== 'AI';
+        if (cleanWord && !cleanWord.startsWith('(')) {
+          wordsToAdd.push({ word: cleanWord, isUser: isUserMessage });
+        }
+        if (mode !== 'idiom') {
+          latestWord = cleanWord;
+        }
+      }
+    });
+
+    if (wordsToAdd.length) {
+      setWordList((prev) => [...prev, ...wordsToAdd]);
+    }
+    if (latestWord) {
+      setCurrentWord(latestWord);
+    }
+  };
+
 
   useEffect(() => {
     scrollToBottom();
@@ -102,18 +186,34 @@ function App() {
     setDifficulty(selectedDifficulty);
     setShowDifficultySelect(false);
     setGameMode(mode);
+    setWordList([]);
+    setCurrentWord('');
+    setGameOverMessage('');
+    setIsGameOver(false);
+    setWcErrorMessage('');
+    setGameMessages([]);
     await fetch(API_URL + '/api/' + base + '/restart/' + username, { method: 'POST' });
     await fetchGameHistory(mode);
-    connectChain(selectedDifficulty, mode);
+    // 초기 상태 가져오기
+    try {
+      const response = await fetch(`${API_URL}/api/${base}/init/${username}/${selectedDifficulty}`);
+      if (response.ok) {
+        const data = await response.json();
+        setScore(data.score || 0);
+        setIsGameOver(data.isGameOver || false);
+        applyChainMessages(data.messages || [], mode);
+      }
+    } catch (error) {
+      console.error('Failed to init game:', error);
+    }
   };
 
   const goBack = () => {
     if (ws) ws.close();
-    if (wordChainWs) wordChainWs.close();
     setWs(null);
-    setWordChainWs(null);
     setGameMode(null);
     setMessages([]);
+    streamingMessageRef.current = null;
     setWordList([]);
     setCurrentWord('');
     setScore(0);
@@ -134,150 +234,95 @@ function App() {
   };
 
   const connectChat = () => {
-    const websocket = new WebSocket(WS_URL + '/ws/' + username);
-    websocket.onopen = () => console.log('Chat connected');
-    websocket.onmessage = (event) => {
+    // SSE 연결
+    const eventSource = new EventSource(API_URL + '/api/chat/stream/' + username);
+    
+    eventSource.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      if (data.type === 'ping') return;
+
       if (data.type === 'session_info') {
         setCurrentSessionId(data.session_id);
       } else if (data.type === 'history') {
         setMessages(data.messages || []);
+        streamingMessageRef.current = null;
       } else if (data.type === 'session_updated') {
         fetchChatSessions();
-      } else if (data.type === 'ai_stream_start') {
-        setMessages((prev) => [
-          ...prev,
-          {
-            type: 'message',
-            username: 'AI',
-            message: '',
-            timestamp: new Date().toISOString(),
-            isStreaming: true,
-          },
-        ]);
-      } else if (data.type === 'ai_stream_chunk') {
-        setMessages((prev) => {
-          const next = [...prev];
-          for (let i = next.length - 1; i >= 0; i -= 1) {
-            if (next[i].username === 'AI' && next[i].isStreaming) {
-              next[i] = {
-                ...next[i],
-                message: (next[i].message || '') + (data.delta || ''),
-              };
-              return next;
-            }
-          }
-
-          next.push({
-            type: 'message',
-            username: 'AI',
-            message: data.delta || '',
-            timestamp: new Date().toISOString(),
-            isStreaming: true,
-          });
-          return next;
-        });
-      } else if (data.type === 'ai_stream_end') {
-        setMessages((prev) => {
-          const next = [...prev];
-          for (let i = next.length - 1; i >= 0; i -= 1) {
-            if (next[i].username === 'AI' && next[i].isStreaming) {
-              next[i] = {
-                ...next[i],
-                isStreaming: false,
-                message: data.message || next[i].message || '',
-                timestamp: data.timestamp || next[i].timestamp,
-              };
-              return next;
-            }
-          }
-
-          next.push({
-            type: 'message',
-            username: 'AI',
-            message: data.message || '',
-            timestamp: data.timestamp || new Date().toISOString(),
-            isStreaming: false,
-          });
-          return next;
-        });
-      } else if (data.type === 'system') {
-        setMessages((prev) => {
-          const next = [...prev];
-          if ((data.message || '').startsWith('AI 응답 오류:')) {
-            for (let i = next.length - 1; i >= 0; i -= 1) {
-              if (next[i].username === 'AI' && next[i].isStreaming) {
-                next[i] = {
-                  ...next[i],
-                  isStreaming: false,
-                  message: next[i].message || '(응답 실패)',
-                };
-                break;
-              }
-            }
-          }
-          next.push(data);
-          return next;
-        });
       } else if (data.type === 'message') {
         setMessages((prev) => [...prev, data]);
+      } else if (data.type === 'ai_stream_start') {
+        addStreamingPlaceholder(data.timestamp || new Date().toISOString());
+      } else if (data.type === 'ai_stream_chunk') {
+        appendStreamingChunk(data.delta || '');
+      } else if (data.type === 'ai_stream_end') {
+        finalizeStreamingMessage(data.ai_message);
       }
     };
-    websocket.onclose = () => console.log('Chat disconnected');
-    setWs(websocket);
+    
+    eventSource.onerror = (error) => {
+      console.error('SSE error:', error);
+    };
+    
+    setWs(eventSource); // ws 대신 eventSource 저장
   };
 
-  const connectChain = (diff, mode = gameMode) => {
-    const base = chainBase(mode);
-    const websocket = new WebSocket(WS_URL + '/ws/' + base + '/' + username + '/' + diff);
-    websocket.onopen = () => console.log('Chain game connected');
-    websocket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'history') {
-        // 무시 - 새 게임
-      } else if (data.type === 'game_over') {
-        setIsGameOver(true);
-        setGameOverMessage(data.message);
-        fetchGameHistory(mode);
-      } else if (data.type === 'score') {
-        setScore(data.score);
-      } else if (data.type === 'system') {
-        // 에러 메시지 표시
-        setWcErrorMessage(data.message);
-        setTimeout(() => setWcErrorMessage(''), 3000);
-        setGameMessages((prev) => [...prev, data]);  // 시스템 메시지도 추가
-      } else if (data.type === 'message') {
-        setWcErrorMessage(''); // 성공하면 에러 메시지 클리어
-        const isUserMessage = data.username !== 'AI';
-        setGameMessages((prev) => [...prev, data]);  // 게임 메시지 추가
-        // 해석은 wordList에 추가하지 않음
-        if (!data.message.startsWith('(')) {
-          const newWord = { word: data.message, isUser: isUserMessage };
-          setWordList((prev) => [...prev, newWord]);
-        }
-        if (mode === 'idiom') {
-          // idiom에서는 AI 메시지가 퀴즈이므로 currentWord 설정하지 않음
-        } else {
-          setCurrentWord(data.message);
+  const sendMessage = async (e) => {
+    e.preventDefault();
+    if (!message.trim()) return;
+
+    const userMessage = message.trim();
+    setMessage('');
+
+    try {
+      const response = await fetch(API_URL + '/api/chat/send/' + username, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message: userMessage }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        console.error('Failed to send message:', data.error || response.statusText);
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+    }
+  };
+
+  const sendWord = async (e) => {
+    e.preventDefault();
+    if (!message.trim() || isGameOver) return;
+    const word = message.trim();
+    setMessage('');
+    setIsLoading(true);
+    try {
+      const endpoint = gameMode === 'idiom' ? 'idiom' : 'wordchain';
+      const response = await fetch(`${API_URL}/api/${endpoint}/send/${username}/${difficulty}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answer: word }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.messages) {
+          applyChainMessages(data.messages, gameMode);
+          // 점수 업데이트
+          const scoreMsg = data.messages.find(m => m.type === 'score');
+          if (scoreMsg) setScore(scoreMsg.score);
+          // 게임 종료 체크
+          const gameOverMsg = data.messages.find(m => m.type === 'game_over');
+          if (gameOverMsg) {
+            setIsGameOver(true);
+            setGameOverMessage(gameOverMsg.message || '');
+            fetchGameHistory(gameMode);
+          }
         }
       }
-    };
-    websocket.onclose = () => console.log('Chain game disconnected');
-    setWordChainWs(websocket);
-  };
-
-  const sendMessage = (e) => {
-    e.preventDefault();
-    if (!message.trim() || !ws) return;
-    ws.send(message);
-    setMessage('');
-  };
-
-  const sendWord = (e) => {
-    e.preventDefault();
-    if (!message.trim() || !wordChainWs || isGameOver) return;
-    wordChainWs.send(message);
-    setMessage('');
+    } catch (error) {
+      console.error('Failed to send word:', error);
+    }
+    setIsLoading(false);
   };
 
   const startNewChat = async () => {
@@ -286,6 +331,7 @@ function App() {
       const response = await fetch(API_URL + '/api/chat/new/' + username, { method: 'POST' });
       if (response.ok) {
         setMessages([]);
+        streamingMessageRef.current = null;
         if (ws) ws.close();
         await fetchChatSessions();
         setTimeout(() => connectChat(), 100);
@@ -305,6 +351,7 @@ function App() {
         const data = await response.json();
         if (data.success) {
           setMessages(data.messages || []);
+          streamingMessageRef.current = null;
           setCurrentSessionId(sessionId);
           if (ws) ws.close();
           setTimeout(() => connectChat(), 100);
@@ -327,6 +374,7 @@ function App() {
         // 현재 세션이 삭제되었으면 다른 세션으로 전환하거나 새로 시작
         if (sessionId === currentSessionId) {
           setMessages([]);
+          streamingMessageRef.current = null;
           if (ws) ws.close();
           setTimeout(() => connectChat(), 100);
         }
@@ -345,9 +393,16 @@ function App() {
         setScore(0);
         setIsGameOver(false);
         setGameOverMessage('');
+        setWcErrorMessage('');
         setGameMessages([]);
-        if (wordChainWs) wordChainWs.close();
-        setTimeout(() => connectChain(difficulty, gameMode), 100);
+        // 초기 상태 다시 가져오기
+        const initResponse = await fetch(`${API_URL}/api/${chainBase(gameMode)}/init/${username}/${difficulty}`);
+        if (initResponse.ok) {
+          const data = await initResponse.json();
+          setScore(data.score || 0);
+          setIsGameOver(data.isGameOver || false);
+          applyChainMessages(data.messages || [], gameMode);
+        }
       }
     } catch (error) {
       console.error('Failed to restart game:', error);

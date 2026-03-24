@@ -329,7 +329,8 @@ async def verify_word_exists(word: str) -> tuple[bool, str]:
 
 async def get_ai_word(used_words: list[str], last_char: str, difficulty: int) -> str:
     """Get AI's word response"""
-    prompt = f"""끝말잇기 게임입니다.
+    try:
+        prompt = f"""끝말잇기 게임입니다.
 사용된 단어들: {', '.join(used_words)}
 '{last_char}'(으)로 시작하는 한국어 단어를 하나만 말하세요.
 
@@ -339,22 +340,30 @@ async def get_ai_word(used_words: list[str], last_char: str, difficulty: int) ->
 - 위에 나온 단어는 사용 불가
 - 단어만 출력하세요"""
 
-    system_prompt = get_difficulty_prompt(difficulty)
+        system_prompt = get_difficulty_prompt(difficulty)
 
-    response = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=50,
-        temperature=0.7 + (difficulty * 0.1)
-    )
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=50,
+            temperature=0.7 + (difficulty * 0.1)
+        )
 
-    ai_word = response.choices[0].message.content.strip()
-    # Clean up
-    ai_word = ai_word.replace(".", "").replace(",", "").replace("!", "").replace("?", "").strip()
-    return ai_word
+        ai_word = response.choices[0].message.content.strip()
+        # Clean up
+        ai_word = ai_word.replace(".", "").replace(",", "").replace("!", "").replace("?", "").strip()
+        return ai_word
+    except Exception as e:
+        print(f"AI word generation failed: {e}")
+        # Fallback words starting with last_char
+        fallbacks = ["사과", "바나나", "학교", "가방", "나무", "구름", "토끼", "꽃", "하늘", "바다"]
+        for fb in fallbacks:
+            if fb.startswith(last_char) and fb not in used_words:
+                return fb
+        return "사과"  # Last resort
 
 
 async def validate_user_word_async(word: str, used_words: list[str], last_word: str | None) -> tuple[bool, str]:

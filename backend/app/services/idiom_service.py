@@ -35,6 +35,7 @@ async def get_idiom_game(username: str) -> dict:
         "score": row["score"],
         "is_game_over": row["is_game_over"],
         "difficulty": row["difficulty"],
+        "current_idiom": row.get("current_idiom"),
     }
 
 
@@ -326,15 +327,16 @@ async def verify_word_exists(word: str) -> tuple[bool, str]:
 
 async def get_ai_word(used_words: list[str], last_char: str | None, difficulty: int) -> str:
     """Get AI idiom response"""
-    difficulty_guide = {
-        1: "아주 쉬운, 잘 알려진 사자성어만 사용",
-        2: "쉬운 사자성어 중심으로 사용",
-        3: "보편적인 사자성어를 균형 있게 사용",
-        4: "상대적으로 어려운 사자성어를 섞어 사용",
-        5: "전문가처럼 어려운 사자성어도 적극 사용",
-    }
+    try:
+        difficulty_guide = {
+            1: "아주 쉬운, 잘 알려진 사자성어만 사용",
+            2: "쉬운 사자성어 중심으로 사용",
+            3: "보편적인 사자성어를 균형 있게 사용",
+            4: "상대적으로 어려운 사자성어를 섞어 사용",
+            5: "전문가처럼 어려운 사자성어도 적극 사용",
+        }
 
-    prompt = f"""사자성어 이어말하기 게임입니다.
+        prompt = f"""사자성어 이어말하기 게임입니다.
 사용된 사자성어: {', '.join(used_words) if used_words else '(없음)'}
 {f"'{last_char}'(으)로 시작하는 " if last_char else ''}한국어 사자성어(정확히 4글자)를 하나만 말하세요.
 
@@ -344,22 +346,30 @@ async def get_ai_word(used_words: list[str], last_char: str | None, difficulty: 
 - 모르면 정확히 '패배'라고 답변
 - 출력은 사자성어 한 개만"""
 
-    response = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": f"너는 사자성어 이어말하기 AI 플레이어다. 난이도 가이드: {difficulty_guide.get(difficulty, difficulty_guide[3])}",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=30,
-        temperature=0.4 + (difficulty * 0.1),
-    )
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"너는 사자성어 이어말하기 AI 플레이어다. 난이도 가이드: {difficulty_guide.get(difficulty, difficulty_guide[3])}",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=30,
+            temperature=0.4 + (difficulty * 0.1),
+        )
 
-    ai_word = response.choices[0].message.content.strip()
-    ai_word = ai_word.replace(".", "").replace(",", "").replace("!", "").replace("?", "").strip()
-    return ai_word
+        ai_word = response.choices[0].message.content.strip()
+        ai_word = ai_word.replace(".", "").replace(",", "").replace("!", "").replace("?", "").strip()
+        return ai_word
+    except Exception as e:
+        print(f"AI idiom generation failed: {e}")
+        # Fallback idioms (4-letter Korean idioms)
+        fallbacks = ["사필귀정", "개과천선", "호기심", "용감한", "지혜로운"]
+        for fb in fallbacks:
+            if fb not in used_words and _is_valid_idiom_format(fb):
+                return fb
+        return "사필귀정"  # Last resort
 
 
 def _is_valid_idiom_format(word: str) -> bool:
