@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const WS_URL = API_URL.replace(/^http/, 'ws');
+
 function App() {
   const [username, setUsername] = useState('');
   const [isJoined, setIsJoined] = useState(false);
@@ -54,7 +57,7 @@ function App() {
   const fetchGameHistory = async (mode = gameMode) => {
     const base = chainBase(mode);
     try {
-      const response = await fetch('http://localhost:8000/api/' + base + '/history/' + username);
+      const response = await fetch(API_URL + '/api/' + base + '/history/' + username);
       if (response.ok) {
         const data = await response.json();
         setGameHistory(data.history || []);
@@ -66,7 +69,7 @@ function App() {
 
   const fetchChatSessions = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/chat/sessions/' + username);
+      const response = await fetch(API_URL + '/api/chat/sessions/' + username);
       if (response.ok) {
         const data = await response.json();
         setChatSessions(data.sessions || []);
@@ -99,7 +102,7 @@ function App() {
     setDifficulty(selectedDifficulty);
     setShowDifficultySelect(false);
     setGameMode(mode);
-    await fetch('http://localhost:8000/api/' + base + '/restart/' + username, { method: 'POST' });
+    await fetch(API_URL + '/api/' + base + '/restart/' + username, { method: 'POST' });
     await fetchGameHistory(mode);
     connectChain(selectedDifficulty, mode);
   };
@@ -131,7 +134,7 @@ function App() {
   };
 
   const connectChat = () => {
-    const websocket = new WebSocket('ws://localhost:8000/ws/' + username);
+    const websocket = new WebSocket(WS_URL + '/ws/' + username);
     websocket.onopen = () => console.log('Chat connected');
     websocket.onmessage = (event) => {
       const data = JSON.parse(event.data);
@@ -226,7 +229,7 @@ function App() {
 
   const connectChain = (diff, mode = gameMode) => {
     const base = chainBase(mode);
-    const websocket = new WebSocket('ws://localhost:8000/ws/' + base + '/' + username + '/' + diff);
+    const websocket = new WebSocket(WS_URL + '/ws/' + base + '/' + username + '/' + diff);
     websocket.onopen = () => console.log('Chain game connected');
     websocket.onmessage = (event) => {
       const data = JSON.parse(event.data);
@@ -280,7 +283,7 @@ function App() {
   const startNewChat = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/chat/new/' + username, { method: 'POST' });
+      const response = await fetch(API_URL + '/api/chat/new/' + username, { method: 'POST' });
       if (response.ok) {
         setMessages([]);
         if (ws) ws.close();
@@ -297,7 +300,7 @@ function App() {
     if (sessionId === currentSessionId) return;
     setIsLoading(true);
     try {
-      const response = await fetch(`http://localhost:8000/api/chat/switch/${username}/${sessionId}`, { method: 'POST' });
+      const response = await fetch(`${API_URL}/api/chat/switch/${username}/${sessionId}`, { method: 'POST' });
       if (response.ok) {
         const data = await response.json();
         if (data.success) {
@@ -318,7 +321,7 @@ function App() {
     if (!window.confirm('이 대화를 삭제할까요?')) return;
 
     try {
-      const response = await fetch(`http://localhost:8000/api/chat/session/${username}/${sessionId}`, { method: 'DELETE' });
+      const response = await fetch(`${API_URL}/api/chat/session/${username}/${sessionId}`, { method: 'DELETE' });
       if (response.ok) {
         await fetchChatSessions();
         // 현재 세션이 삭제되었으면 다른 세션으로 전환하거나 새로 시작
@@ -335,7 +338,7 @@ function App() {
 
   const restartWordChain = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/' + chainBase(gameMode) + '/restart/' + username, { method: 'POST' });
+      const response = await fetch(API_URL + '/api/' + chainBase(gameMode) + '/restart/' + username, { method: 'POST' });
       if (response.ok) {
         setWordList([]);
         setCurrentWord('');
@@ -357,7 +360,7 @@ function App() {
     if (!window.confirm('이 게임 기록을 삭제할까요?')) return;
 
     try {
-      const response = await fetch(`http://localhost:8000/api/${chainBase(gameMode)}/history/${username}/${index}`, { method: 'DELETE' });
+      const response = await fetch(`${API_URL}/api/${chainBase(gameMode)}/history/${username}/${index}`, { method: 'DELETE' });
       if (response.ok) {
         await fetchGameHistory();
         if (selectedGame === index) {

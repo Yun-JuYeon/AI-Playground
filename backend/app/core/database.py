@@ -25,8 +25,17 @@ class PostgresClient:
             return
 
         pool_kwargs = self._pool_kwargs()
+        
+        # 서버리스 환경(Vercel)을 위해 연결 개수 최소화 설정 추가
+        # Supabase 무료 티어의 연결 제한을 넘지 않도록 합니다.
+        pool_kwargs.update({
+            "min_size": 1,
+            "max_size": 1,
+            "command_timeout": 60
+        })
 
         if POSTGRES_URL:
+            # 6543 포트를 사용하는 URL인지 확인하세요!
             self.pool = await asyncpg.create_pool(dsn=POSTGRES_URL, **pool_kwargs)
         else:
             self.pool = await asyncpg.create_pool(
