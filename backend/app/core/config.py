@@ -6,9 +6,13 @@ load_dotenv()
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Redis
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+# PostgreSQL
+POSTGRES_URL = os.getenv("POSTGRES_URL")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", 5432))
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "ai_playground")
 
 # Prompts
 SYSTEM_PROMPT = "You are a helpful assistant. Respond in the same language the user uses. Keep responses concise and friendly."

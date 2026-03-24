@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import chat, wordchain
+from .routers import chat, wordchain, idiom
+from .core.database import storage_client
 
 app = FastAPI(title="AI Playground API")
 
@@ -12,9 +13,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+async def on_startup():
+    await storage_client.connect()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await storage_client.close()
+
+
 # Include routers
 app.include_router(chat.router)
 app.include_router(wordchain.router)
+app.include_router(idiom.router)
 
 
 @app.get("/")

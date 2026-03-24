@@ -7,7 +7,7 @@ from ..services.chat_service import (
     save_session,
     switch_session,
     get_all_sessions,
-    get_ai_response,
+    get_ai_response_stream,
     delete_session
 )
 
@@ -115,7 +115,21 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
             await websocket.send_json({"type": "session_updated"})
 
             try:
-                ai_message = await get_ai_response(conversation)
+                await websocket.send_json({"type": "ai_stream_start"})
+
+                ai_parts = []
+                async for chunk in get_ai_response_stream(conversation):
+                    ai_parts.append(chunk)
+                    await websocket.send_json({
+                        "type": "ai_stream_chunk",
+                        "delta": chunk
+                    })
+
+                ai_message = "".join(ai_parts).strip()
+
+                if not ai_message:
+                    raise RuntimeError("AI 응답이 비어 있습니다")
+
                 conversation.append({"role": "assistant", "content": ai_message})
 
                 ai_timestamp = datetime.now().isoformat()
@@ -133,7 +147,11 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
                 session["messages"] = chat_messages
                 await save_session(username, session_id, session)
 
-                await websocket.send_json(ai_msg)
+                await websocket.send_json({
+                    "type": "ai_stream_end",
+                    "message": ai_message,
+                    "timestamp": ai_timestamp
+                })
 
                 # Notify client to update sidebar again
                 await websocket.send_json({"type": "session_updated"})

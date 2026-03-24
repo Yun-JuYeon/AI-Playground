@@ -1,11 +1,10 @@
 import json
 from datetime import datetime
 from ..core.database import storage_client, openai_client
-from ..core.config import get_difficulty_prompt
-from ..core.utils import get_last_char, is_valid_korean_word, is_valid_korean_format
+from ..core.utils import get_last_char
 
 
-MAX_WORDCHAIN_HISTORY = 20
+MAX_IDIOM_HISTORY = 20
 
 
 def _as_list(value):
@@ -14,22 +13,22 @@ def _as_list(value):
     return value or []
 
 
-async def get_wordchain_game(username: str) -> dict:
-    """Get wordchain game state from PostgreSQL"""
+async def get_idiom_game(username: str) -> dict:
+    """Get idiom game state from PostgreSQL"""
     pool = await storage_client.get_pool()
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT used_words, score, is_game_over, difficulty
-            FROM wordchain_state
+            SELECT used_words, score, is_game_over, difficulty, current_idiom
+            FROM idiom_state
             WHERE username = $1
             """,
             username,
         )
 
     if not row:
-        return {"used_words": [], "score": 0, "is_game_over": False, "difficulty": 3}
+        return {"used_words": [], "score": 0, "is_game_over": False, "difficulty": 3, "current_idiom": None}
 
     return {
         "used_words": _as_list(row["used_words"]),
@@ -39,30 +38,33 @@ async def get_wordchain_game(username: str) -> dict:
     }
 
 
-async def save_wordchain_game(username: str, game_state: dict):
-    """Save wordchain game state to PostgreSQL"""
+async def save_idiom_game(username: str, game_state: dict):
+    """Save idiom game state to PostgreSQL"""
     pool = await storage_client.get_pool()
 
     used_words = game_state.get("used_words", [])
     score = int(game_state.get("score", 0))
     is_game_over = bool(game_state.get("is_game_over", False))
     difficulty = int(game_state.get("difficulty", 3))
+    current_idiom = game_state.get("current_idiom")
 
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO wordchain_state (
+            INSERT INTO idiom_state (
                 username,
                 used_words,
                 score,
                 is_game_over,
-                difficulty
+                difficulty,
+                current_idiom
             ) VALUES (
                 $1,
                 $2::jsonb,
                 $3,
                 $4,
-                $5
+                $5,
+                $6
             )
             ON CONFLICT (username)
             DO UPDATE SET
@@ -70,6 +72,7 @@ async def save_wordchain_game(username: str, game_state: dict):
                 score = EXCLUDED.score,
                 is_game_over = EXCLUDED.is_game_over,
                 difficulty = EXCLUDED.difficulty,
+                current_idiom = EXCLUDED.current_idiom,
                 updated_at = NOW()
             """,
             username,
@@ -77,18 +80,19 @@ async def save_wordchain_game(username: str, game_state: dict):
             score,
             is_game_over,
             difficulty,
+            current_idiom,
         )
 
 
-async def get_wordchain_messages(username: str) -> list[dict]:
-    """Get wordchain messages for current game from PostgreSQL"""
+async def get_idiom_messages(username: str) -> list[dict]:
+    """Get idiom messages for current game from PostgreSQL"""
     pool = await storage_client.get_pool()
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT messages
-            FROM wordchain_state
+            FROM idiom_state
             WHERE username = $1
             """,
             username,
@@ -100,14 +104,14 @@ async def get_wordchain_messages(username: str) -> list[dict]:
     return _as_list(row["messages"])
 
 
-async def save_wordchain_messages(username: str, messages: list[dict]):
-    """Save wordchain messages to PostgreSQL"""
+async def save_idiom_messages(username: str, messages: list[dict]):
+    """Save idiom messages to PostgreSQL"""
     pool = await storage_client.get_pool()
 
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO wordchain_state (username, messages)
+            INSERT INTO idiom_state (username, messages)
             VALUES ($1, $2::jsonb)
             ON CONFLICT (username)
             DO UPDATE SET
@@ -119,7 +123,7 @@ async def save_wordchain_messages(username: str, messages: list[dict]):
         )
 
 
-async def get_wordchain_history(username: str) -> list[dict]:
+async def get_idiom_history(username: str) -> list[dict]:
     """Get all past game history for sidebar"""
     pool = await storage_client.get_pool()
 
@@ -127,13 +131,13 @@ async def get_wordchain_history(username: str) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT score, difficulty, words_count, words, result, played_at
-            FROM wordchain_history
+            FROM idiom_history
             WHERE username = $1
             ORDER BY played_at DESC, id DESC
             LIMIT $2
             """,
             username,
-            MAX_WORDCHAIN_HISTORY,
+            MAX_IDIOM_HISTORY,
         )
 
     history = []
@@ -168,7 +172,7 @@ async def save_game_to_history(username: str, game_result: dict):
             if timestamp:
                 await conn.execute(
                     """
-                    INSERT INTO wordchain_history (
+                    INSERT INTO idiom_history (
                         username,
                         score,
                         difficulty,
@@ -197,7 +201,7 @@ async def save_game_to_history(username: str, game_result: dict):
             else:
                 await conn.execute(
                     """
-                    INSERT INTO wordchain_history (
+                    INSERT INTO idiom_history (
                         username,
                         score,
                         difficulty,
@@ -223,7 +227,7 @@ async def save_game_to_history(username: str, game_result: dict):
 
             await conn.execute(
                 """
-                DELETE FROM wordchain_history
+                DELETE FROM idiom_history
                 WHERE username = $1
                   AND id IN (
                       SELECT id
@@ -233,29 +237,29 @@ async def save_game_to_history(username: str, game_result: dict):
                                      PARTITION BY username
                                      ORDER BY played_at DESC, id DESC
                                  ) AS rn
-                          FROM wordchain_history
+                          FROM idiom_history
                           WHERE username = $1
                       ) ranked
                       WHERE rn > $2
                   )
                 """,
                 username,
-                MAX_WORDCHAIN_HISTORY,
+                MAX_IDIOM_HISTORY,
             )
 
 
-async def clear_wordchain(username: str):
-    """Clear current wordchain game for a user"""
+async def clear_idiom(username: str):
+    """Clear current idiom game for a user"""
     pool = await storage_client.get_pool()
 
     async with pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM wordchain_state WHERE username = $1",
+            "DELETE FROM idiom_state WHERE username = $1",
             username,
         )
 
 
-async def delete_wordchain_history_item(username: str, index: int) -> bool:
+async def delete_idiom_history_item(username: str, index: int) -> bool:
     """Delete a specific game from history by index"""
     if index < 0:
         return False
@@ -266,7 +270,7 @@ async def delete_wordchain_history_item(username: str, index: int) -> bool:
         row = await conn.fetchrow(
             """
             SELECT id
-            FROM wordchain_history
+            FROM idiom_history
             WHERE username = $1
             ORDER BY played_at DESC, id DESC
             OFFSET $2
@@ -280,7 +284,7 @@ async def delete_wordchain_history_item(username: str, index: int) -> bool:
             return False
 
         await conn.execute(
-            "DELETE FROM wordchain_history WHERE id = $1",
+            "DELETE FROM idiom_history WHERE id = $1",
             row["id"],
         )
 
@@ -288,93 +292,97 @@ async def delete_wordchain_history_item(username: str, index: int) -> bool:
 
 
 async def verify_word_exists(word: str) -> tuple[bool, str]:
-    """Verify if a word is a real Korean word using OpenAI"""
-    prompt = f"""'{word}'가 끝말잇기에서 사용할 수 있는 단어인지 확인해주세요.
+    """Verify if an idiom is a valid Korean four-character idiom using OpenAI"""
+    prompt = f"""'{word}'이(가) 한국어 사자성어(4글자)로 실제로 널리 쓰이는 표현인지 확인해주세요.
 
-허용되는 단어 (거의 다 허용!):
-- 일반 명사, 음식 이름, 동물, 식물
-- 브랜드명 (람보르기니, 맥도날드, 삼성, 나이키 등 OK!)
-- 지명, 나라 이름 (서울, 미국, 파리 등)
-- 외래어, 외국어 단어
-- 유명인 이름도 OK (아이유, 손흥민 등)
-- 한국에서 알려진 단어면 대부분 OK
+판정 기준:
+- 실제로 알려진 사자성어면 YES
+- 사자성어가 아니거나 임의 조합이면 NO
+- 정확히 4글자 한글 표현만 허용
 
-허용 안 되는 단어:
-- 완전히 지어낸 말 (의미 없는 글자 조합)
-- 1글자 단어
-
-답변: YES 또는 NO"""
+답변 형식: YES 또는 NO"""
 
     response = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "당신은 관대한 끝말잇기 심판입니다. 실제로 존재하거나 사람들이 아는 단어면 거의 다 허용합니다. 매우 관대하게 판단하세요."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "당신은 사자성어 판정 심판입니다. 실제로 통용되는 사자성어만 YES로 답하세요.",
+            },
+            {"role": "user", "content": prompt},
         ],
-        max_tokens=50,
-        temperature=0
+        max_tokens=30,
+        temperature=0,
     )
 
     result = response.choices[0].message.content.strip().upper()
-
-    # "YES"가 응답에 포함되어 있으면 유효한 단어
     if "YES" in result:
         return True, ""
-    else:
-        # NO인 경우 이유 추출
-        original = response.choices[0].message.content.strip()
-        reason = original.replace("NO:", "").replace("NO", "").replace("답변:", "").strip()
-        return False, reason if reason else "끝말잇기에 사용할 수 없는 단어입니다"
+
+    original = response.choices[0].message.content.strip()
+    reason = original.replace("NO:", "").replace("NO", "").replace("답변:", "").strip()
+    return False, reason if reason else "사자성어 이어말하기에 사용할 수 없는 표현입니다"
 
 
-async def get_ai_word(used_words: list[str], last_char: str, difficulty: int) -> str:
-    """Get AI's word response"""
-    prompt = f"""끝말잇기 게임입니다.
-사용된 단어들: {', '.join(used_words)}
-'{last_char}'(으)로 시작하는 한국어 단어를 하나만 말하세요.
+async def get_ai_word(used_words: list[str], last_char: str | None, difficulty: int) -> str:
+    """Get AI idiom response"""
+    difficulty_guide = {
+        1: "아주 쉬운, 잘 알려진 사자성어만 사용",
+        2: "쉬운 사자성어 중심으로 사용",
+        3: "보편적인 사자성어를 균형 있게 사용",
+        4: "상대적으로 어려운 사자성어를 섞어 사용",
+        5: "전문가처럼 어려운 사자성어도 적극 사용",
+    }
+
+    prompt = f"""사자성어 이어말하기 게임입니다.
+사용된 사자성어: {', '.join(used_words) if used_words else '(없음)'}
+{f"'{last_char}'(으)로 시작하는 " if last_char else ''}한국어 사자성어(정확히 4글자)를 하나만 말하세요.
 
 조건:
-- 표준국어대사전에 등재된 명사만 가능
-- 고유명사(사람 이름, 지명, 브랜드명) 불가
-- 위에 나온 단어는 사용 불가
-- 단어만 출력하세요"""
-
-    system_prompt = get_difficulty_prompt(difficulty)
+- 정확히 4글자 한글 사자성어
+- 이미 사용한 표현은 금지
+- 모르면 정확히 '패배'라고 답변
+- 출력은 사자성어 한 개만"""
 
     response = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": f"너는 사자성어 이어말하기 AI 플레이어다. 난이도 가이드: {difficulty_guide.get(difficulty, difficulty_guide[3])}",
+            },
+            {"role": "user", "content": prompt},
         ],
-        max_tokens=50,
-        temperature=0.7 + (difficulty * 0.1)
+        max_tokens=30,
+        temperature=0.4 + (difficulty * 0.1),
     )
 
     ai_word = response.choices[0].message.content.strip()
-    # Clean up
     ai_word = ai_word.replace(".", "").replace(",", "").replace("!", "").replace("?", "").strip()
     return ai_word
 
 
+def _is_valid_idiom_format(word: str) -> bool:
+    return len(word) == 4 and all("가" <= ch <= "힣" for ch in word)
+
+
+def is_valid_full_idiom(word: str) -> bool:
+    return _is_valid_idiom_format(word)
+
+
 async def validate_user_word_async(word: str, used_words: list[str], last_word: str | None) -> tuple[bool, str]:
-    """Validate user's word with dictionary check. Returns (is_valid, error_message)"""
-    # 기본 형식 검사
-    if not is_valid_korean_format(word):
-        return False, "올바른 한글 단어를 입력하세요 (2글자 이상)"
+    """Validate user's idiom with dictionary check. Returns (is_valid, error_message)"""
+    if not _is_valid_idiom_format(word):
+        return False, "사자성어는 한글 4글자로 입력하세요"
 
-    # 중복 검사
     if word in used_words:
-        return False, f"'{word}'은(는) 이미 사용된 단어입니다!"
+        return False, f"'{word}'은(는) 이미 사용된 사자성어입니다!"
 
-    # 끝말잇기 규칙 검사 (두음법칙 적용)
     if last_word:
         expected_char = get_last_char(last_word)
-        # 두음법칙: 원래 글자와 변환된 글자 모두 허용
-        if word[0] != expected_char and word[0] != last_word[-1]:
-            return False, f"'{expected_char}'(으)로 시작하는 단어를 입력하세요!"
+        if word[0] != expected_char:
+            return False, f"'{expected_char}'(으)로 시작하는 사자성어를 입력하세요!"
 
-    # 사전 검증 (실제 단어인지 확인)
     is_real_word, reason = await verify_word_exists(word)
     if not is_real_word:
         return False, f"'{word}'은(는) {reason}"
@@ -382,32 +390,42 @@ async def validate_user_word_async(word: str, used_words: list[str], last_word: 
     return True, ""
 
 
-# 동기 버전 (하위 호환성)
-def validate_user_word(word: str, used_words: list[str], last_word: str | None) -> tuple[bool, str]:
-    """Validate user's word (basic check only). Returns (is_valid, error_message)"""
-    if not is_valid_korean_format(word):
-        return False, "올바른 한글 단어를 입력하세요 (2글자 이상)"
-
-    if word in used_words:
-        return False, f"'{word}'은(는) 이미 사용된 단어입니다!"
-
-    if last_word:
-        expected_char = get_last_char(last_word)
-        if word[0] != expected_char and word[0] != last_word[-1]:
-            return False, f"'{expected_char}'(으)로 시작하는 단어를 입력하세요!"
-
-    return True, ""
-
-
 def validate_ai_word(ai_word: str, used_words: list[str], last_char: str) -> tuple[bool, str]:
-    """Validate AI's word. Returns (is_valid, win_message)"""
-    if "패배" in ai_word or not is_valid_korean_format(ai_word):
-        return False, "🎉 축하합니다! AI가 단어를 찾지 못했습니다!"
+    """Validate AI's idiom. Returns (is_valid, win_message)"""
+    if "패배" in ai_word or not _is_valid_idiom_format(ai_word):
+        return False, "축하합니다! AI가 사자성어를 찾지 못했습니다!"
 
-    if ai_word[0] != last_char and ai_word[0] != last_char:
-        return False, "🎉 축하합니다! AI가 규칙을 어겼습니다!"
+    if ai_word[0] != last_char:
+        return False, "축하합니다! AI가 규칙을 어겼습니다!"
 
     if ai_word in used_words:
-        return False, "🎉 축하합니다! AI가 중복 단어를 말했습니다!"
+        return False, "축하합니다! AI가 중복 사자성어를 말했습니다!"
 
     return True, ""
+
+
+
+def is_valid_idiom_suffix(answer: str) -> bool:
+    return len(answer) == 2 and all("가" <= ch <= "힣" for ch in answer)
+
+
+def get_idiom_prefix(idiom: str) -> str:
+    return idiom[:2] if idiom else ""
+
+
+def get_idiom_suffix(idiom: str) -> str:
+    return idiom[2:] if idiom else ""
+
+
+async def get_idiom_meaning(idiom: str) -> str:
+    response = await openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "너는 사자성어 해설가다. 해석을 한국어 한 문장으로 간결하게 설명한다."},
+            {"role": "user", "content": f"{idiom}의 뜻을 한국어로 짧게 설명해줘."},
+        ],
+        max_tokens=80,
+        temperature=0.2,
+    )
+    meaning = response.choices[0].message.content.strip()
+    return meaning or "해석 정보를 가져오지 못했습니다."

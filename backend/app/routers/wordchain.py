@@ -102,7 +102,6 @@ async def wordchain_endpoint(websocket: WebSocket, username: str, difficulty: in
                     "message": f"💔 패배! {error_msg} 최종 점수: {score}점",
                     "timestamp": timestamp
                 }
-                await websocket.send_json(game_over_msg)
                 wc_messages.append(game_over_msg)
                 is_game_over = True
                 game_state = {"used_words": used_words, "score": score, "is_game_over": True, "difficulty": difficulty}
@@ -118,6 +117,7 @@ async def wordchain_endpoint(websocket: WebSocket, username: str, difficulty: in
                     "result": "lose",
                     "timestamp": timestamp
                 })
+                await websocket.send_json(game_over_msg)
                 continue
 
             user_msg = {
@@ -152,7 +152,6 @@ async def wordchain_endpoint(websocket: WebSocket, username: str, difficulty: in
                         "message": f"{win_message} 최종 점수: {score}점",
                         "timestamp": ai_timestamp
                     }
-                    await websocket.send_json(game_over_msg)
                     wc_messages.append(game_over_msg)
                     is_game_over = True
                     game_state = {"used_words": used_words, "score": score, "is_game_over": True, "difficulty": difficulty}
@@ -168,6 +167,7 @@ async def wordchain_endpoint(websocket: WebSocket, username: str, difficulty: in
                         "result": "win",
                         "timestamp": ai_timestamp
                     })
+                    await websocket.send_json(game_over_msg)
                     continue
 
                 ai_msg = {
@@ -193,8 +193,11 @@ async def wordchain_endpoint(websocket: WebSocket, username: str, difficulty: in
                     "message": f"🎉 AI 오류로 승리! 최종 점수: {score}점",
                     "timestamp": error_timestamp
                 }
-                await websocket.send_json(game_over_msg)
+                wc_messages.append(game_over_msg)
                 is_game_over = True
+                game_state = {"used_words": used_words, "score": score, "is_game_over": True, "difficulty": difficulty}
+                await save_wordchain_game(username, game_state)
+                await save_wordchain_messages(username, wc_messages)
                 await save_game_to_history(username, {
                     "score": score,
                     "difficulty": difficulty,
@@ -203,6 +206,7 @@ async def wordchain_endpoint(websocket: WebSocket, username: str, difficulty: in
                     "result": "win",
                     "timestamp": error_timestamp
                 })
+                await websocket.send_json(game_over_msg)
                 continue
 
     except WebSocketDisconnect:

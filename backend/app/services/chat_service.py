@@ -1,209 +1,317 @@
 import json
 import uuid
+from typing import AsyncGenerator
 from datetime import datetime
-from ..core.database import redis_client, openai_client
+from asyncpg import UniqueViolationError
+from ..core.database import storage_client, openai_client
 from ..core.config import SYSTEM_PROMPT
 
 
-def get_session_key(username: str, session_id: str) -> str:
-    """Get Redis key for a specific chat session"""
-    return f"chat:session:{username}:{session_id}"
+MAX_SESSIONS_PER_USER = 20
 
 
-def get_session_list_key(username: str) -> str:
-    """Get Redis key for user's session list"""
-    return f"chat:sessions:{username}"
+def _session_row_to_dict(row) -> dict:
+    if not row:
+        return None
+
+    conversation = row["conversation"]
+    messages = row["messages"]
+
+    if isinstance(conversation, str):
+        conversation = json.loads(conversation)
+    if isinstance(messages, str):
+        messages = json.loads(messages)
+
+    created_at = row["created_at"]
+    updated_at = row["updated_at"]
+
+    return {
+        "id": row["session_id"],
+        "conversation": conversation or [],
+        "messages": messages or [],
+        "created_at": created_at.isoformat() if created_at else datetime.now().isoformat(),
+        "updated_at": updated_at.isoformat() if updated_at else datetime.now().isoformat(),
+    }
 
 
-def get_current_session_key(username: str) -> str:
-    """Get Redis key for user's current session ID"""
-    return f"chat:current:{username}"
+async def _enforce_session_limit(conn, username: str):
+    await conn.execute(
+        """
+        DELETE FROM chat_history
+        WHERE username = $1
+          AND session_id IN (
+            SELECT session_id
+            FROM (
+              SELECT session_id,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY username
+                       ORDER BY updated_at DESC
+                     ) AS rn
+              FROM chat_history
+              WHERE username = $1
+            ) ranked
+            WHERE rn > $2
+          )
+        """,
+        username,
+        MAX_SESSIONS_PER_USER,
+    )
 
 
 async def create_new_session(username: str) -> str:
     """Create a new chat session and return its ID"""
-    session_id = str(uuid.uuid4())[:8]
+    pool = await storage_client.get_pool()
 
-    # Initialize session data
-    session_data = {
-        "id": session_id,
-        "conversation": [{"role": "system", "content": SYSTEM_PROMPT}],
-        "messages": [],
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat()
-    }
+    for _ in range(5):
+        session_id = str(uuid.uuid4())[:8]
+        conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = []
 
-    # Save session
-    await redis_client.set(
-        get_session_key(username, session_id),
-        json.dumps(session_data)
-    )
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE chat_history SET is_current = FALSE WHERE username = $1",
+                    username,
+                )
 
-    # Set as current session
-    await redis_client.set(get_current_session_key(username), session_id)
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO chat_history (
+                            username,
+                            session_id,
+                            conversation,
+                            messages,
+                            is_current
+                        ) VALUES (
+                            $1,
+                            $2,
+                            $3::jsonb,
+                            $4::jsonb,
+                            TRUE
+                        )
+                        """,
+                        username,
+                        session_id,
+                        json.dumps(conversation),
+                        json.dumps(messages),
+                    )
+                except UniqueViolationError:
+                    continue
 
-    # Add to session list
-    await add_session_to_list(username, session_id)
+                await _enforce_session_limit(conn, username)
+                return session_id
 
-    return session_id
-
-
-async def add_session_to_list(username: str, session_id: str):
-    """Add session ID to user's session list"""
-    key = get_session_list_key(username)
-    data = await redis_client.get(key)
-    sessions = json.loads(data) if data else []
-
-    # Remove if already exists (to move to front)
-    if session_id in sessions:
-        sessions.remove(session_id)
-
-    # Add to front
-    sessions.insert(0, session_id)
-
-    # Keep max 20 sessions
-    if len(sessions) > 20:
-        # Delete old session data
-        old_id = sessions.pop()
-        await redis_client.delete(get_session_key(username, old_id))
-
-    await redis_client.set(key, json.dumps(sessions))
+    raise RuntimeError("Failed to create unique session id")
 
 
 async def get_current_session_id(username: str) -> str:
     """Get current session ID, create new if none exists"""
-    key = get_current_session_key(username)
-    session_id = await redis_client.get(key)
+    pool = await storage_client.get_pool()
 
-    if session_id:
-        return session_id
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT session_id
+            FROM chat_history
+            WHERE username = $1 AND is_current = TRUE
+            LIMIT 1
+            """,
+            username,
+        )
 
-    # Create new session if none exists
+    if row:
+        return row["session_id"]
+
     return await create_new_session(username)
 
 
 async def get_session(username: str, session_id: str) -> dict:
     """Get session data by ID"""
-    key = get_session_key(username, session_id)
-    data = await redis_client.get(key)
+    pool = await storage_client.get_pool()
 
-    if data:
-        return json.loads(data)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT session_id, conversation, messages, created_at, updated_at
+            FROM chat_history
+            WHERE username = $1 AND session_id = $2
+            LIMIT 1
+            """,
+            username,
+            session_id,
+        )
 
-    return None
+    return _session_row_to_dict(row)
 
 
 async def save_session(username: str, session_id: str, session_data: dict):
     """Save session data"""
-    session_data["updated_at"] = datetime.now().isoformat()
+    pool = await storage_client.get_pool()
 
-    await redis_client.set(
-        get_session_key(username, session_id),
-        json.dumps(session_data)
-    )
+    conversation = session_data.get("conversation", [])
+    messages = session_data.get("messages", [])
 
-    # Move to front of list
-    await add_session_to_list(username, session_id)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE chat_history SET is_current = FALSE WHERE username = $1",
+                username,
+            )
+
+            await conn.execute(
+                """
+                UPDATE chat_history
+                SET conversation = $3::jsonb,
+                    messages = $4::jsonb,
+                    updated_at = NOW(),
+                    is_current = TRUE
+                WHERE username = $1 AND session_id = $2
+                """,
+                username,
+                session_id,
+                json.dumps(conversation),
+                json.dumps(messages),
+            )
+
+            await _enforce_session_limit(conn, username)
 
 
 async def switch_session(username: str, session_id: str) -> dict:
     """Switch to a different session"""
-    session = await get_session(username, session_id)
+    pool = await storage_client.get_pool()
 
-    if session:
-        await redis_client.set(get_current_session_key(username), session_id)
-        return session
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            exists = await conn.fetchval(
+                """
+                SELECT 1
+                FROM chat_history
+                WHERE username = $1 AND session_id = $2
+                """,
+                username,
+                session_id,
+            )
 
-    return None
+            if not exists:
+                return None
+
+            await conn.execute(
+                "UPDATE chat_history SET is_current = FALSE WHERE username = $1",
+                username,
+            )
+            await conn.execute(
+                """
+                UPDATE chat_history
+                SET is_current = TRUE,
+                    updated_at = NOW()
+                WHERE username = $1 AND session_id = $2
+                """,
+                username,
+                session_id,
+            )
+
+        row = await conn.fetchrow(
+            """
+            SELECT session_id, conversation, messages, created_at, updated_at
+            FROM chat_history
+            WHERE username = $1 AND session_id = $2
+            LIMIT 1
+            """,
+            username,
+            session_id,
+        )
+
+    return _session_row_to_dict(row)
 
 
 async def get_all_sessions(username: str) -> list[dict]:
     """Get all sessions for sidebar display"""
-    # 기존 데이터 마이그레이션 체크
-    await migrate_old_data(username)
+    pool = await storage_client.get_pool()
 
-    list_key = get_session_list_key(username)
-    data = await redis_client.get(list_key)
-    session_ids = json.loads(data) if data else []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT session_id, messages, created_at, updated_at
+            FROM chat_history
+            WHERE username = $1
+            ORDER BY updated_at DESC
+            LIMIT $2
+            """,
+            username,
+            MAX_SESSIONS_PER_USER,
+        )
 
     sessions = []
-    for sid in session_ids:
-        session = await get_session(username, sid)
-        if session:
-            # Get preview from first user message
-            user_messages = [m for m in session.get("messages", []) if m.get("type") == "message" and m.get("username") != "AI"]
-            preview = ""
-            if user_messages:
-                preview = user_messages[0]["message"][:30]
-                if len(user_messages[0]["message"]) > 30:
-                    preview += "..."
+    for row in rows:
+        messages = row["messages"]
+        if isinstance(messages, str):
+            messages = json.loads(messages)
 
-            sessions.append({
-                "id": session["id"],
-                "preview": preview or "새 대화",
-                "message_count": len([m for m in session.get("messages", []) if m.get("type") == "message"]),
-                "updated_at": session.get("updated_at", session.get("created_at"))
-            })
+        user_messages = [
+            m for m in (messages or [])
+            if m.get("type") == "message" and m.get("username") != "AI"
+        ]
+
+        preview = ""
+        if user_messages:
+            preview = user_messages[0]["message"][:30]
+            if len(user_messages[0]["message"]) > 30:
+                preview += "..."
+
+        sessions.append({
+            "id": row["session_id"],
+            "preview": preview or "새 대화",
+            "message_count": len([
+                m for m in (messages or []) if m.get("type") == "message"
+            ]),
+            "updated_at": (row["updated_at"] or row["created_at"]).isoformat(),
+        })
 
     return sessions
 
 
-async def migrate_old_data(username: str):
-    """Migrate old chat data to new session format"""
-    old_conv_key = f"chat:conversation:{username}"
-    old_msg_key = f"chat:messages:{username}"
-
-    old_conv = await redis_client.get(old_conv_key)
-    old_msg = await redis_client.get(old_msg_key)
-
-    if old_msg:
-        messages = json.loads(old_msg)
-        if messages:
-            # Create a session from old data
-            session_id = str(uuid.uuid4())[:8]
-            conversation = json.loads(old_conv) if old_conv else [{"role": "system", "content": SYSTEM_PROMPT}]
-
-            session_data = {
-                "id": session_id,
-                "conversation": conversation,
-                "messages": messages,
-                "created_at": messages[0].get("timestamp", datetime.now().isoformat()) if messages else datetime.now().isoformat(),
-                "updated_at": messages[-1].get("timestamp", datetime.now().isoformat()) if messages else datetime.now().isoformat()
-            }
-
-            await redis_client.set(
-                get_session_key(username, session_id),
-                json.dumps(session_data)
-            )
-
-            await add_session_to_list(username, session_id)
-            await redis_client.set(get_current_session_key(username), session_id)
-
-    # Delete old keys
-    await redis_client.delete(old_conv_key, old_msg_key)
-
-
 async def delete_session(username: str, session_id: str) -> bool:
     """Delete a specific chat session"""
-    # Delete session data
-    await redis_client.delete(get_session_key(username, session_id))
+    pool = await storage_client.get_pool()
 
-    # Remove from session list
-    list_key = get_session_list_key(username)
-    data = await redis_client.get(list_key)
-    sessions = json.loads(data) if data else []
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            deleted_row = await conn.fetchrow(
+                """
+                DELETE FROM chat_history
+                WHERE username = $1 AND session_id = $2
+                RETURNING is_current
+                """,
+                username,
+                session_id,
+            )
 
-    if session_id in sessions:
-        sessions.remove(session_id)
-        await redis_client.set(list_key, json.dumps(sessions))
+            if not deleted_row:
+                return False
 
-    # If deleted session was current, switch to another or create new
-    current_id = await redis_client.get(get_current_session_key(username))
-    if current_id == session_id:
-        if sessions:
-            await redis_client.set(get_current_session_key(username), sessions[0])
-        else:
-            await redis_client.delete(get_current_session_key(username))
+            if deleted_row["is_current"]:
+                next_row = await conn.fetchrow(
+                    """
+                    SELECT session_id
+                    FROM chat_history
+                    WHERE username = $1
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    username,
+                )
+
+                if next_row:
+                    await conn.execute(
+                        """
+                        UPDATE chat_history
+                        SET is_current = TRUE
+                        WHERE username = $1 AND session_id = $2
+                        """,
+                        username,
+                        next_row["session_id"],
+                    )
 
     return True
 
@@ -216,3 +324,21 @@ async def get_ai_response(conversation: list[dict]) -> str:
         max_tokens=1000,
     )
     return response.choices[0].message.content
+
+
+async def get_ai_response_stream(conversation: list[dict]) -> AsyncGenerator[str, None]:
+    """Stream AI response chunks from OpenAI"""
+    stream = await openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=conversation,
+        max_tokens=1000,
+        stream=True,
+    )
+
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta

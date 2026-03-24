@@ -18,8 +18,10 @@ function App() {
   const [isGameOver, setIsGameOver] = useState(false);
   const [gameOverMessage, setGameOverMessage] = useState('');
   const [wordChainWs, setWordChainWs] = useState(null);
+  const [gameMessages, setGameMessages] = useState([]);
   const [difficulty, setDifficulty] = useState(3);
   const [showDifficultySelect, setShowDifficultySelect] = useState(false);
+  const [selectedChainMode, setSelectedChainMode] = useState('wordchain');
   const [gameHistory, setGameHistory] = useState([]);
   const [selectedGame, setSelectedGame] = useState(null);
   const wordListRef = useRef(null);
@@ -47,9 +49,12 @@ function App() {
     scrollWordListToEnd();
   }, [wordList]);
 
-  const fetchGameHistory = async () => {
+  const chainBase = (mode) => (mode === 'idiom' ? 'idiom' : 'wordchain');
+
+  const fetchGameHistory = async (mode = gameMode) => {
+    const base = chainBase(mode);
     try {
-      const response = await fetch('http://localhost:8000/api/wordchain/history/' + username);
+      const response = await fetch('http://localhost:8000/api/' + base + '/history/' + username);
       if (response.ok) {
         const data = await response.json();
         setGameHistory(data.history || []);
@@ -82,18 +87,21 @@ function App() {
       setGameMode(mode);
       await fetchChatSessions();
       connectChat();
-    } else if (mode === 'wordchain') {
+    } else if (mode === 'wordchain' || mode === 'idiom') {
+      setSelectedChainMode(mode);
       setShowDifficultySelect(true);
     }
   };
 
-  const startWordChain = async (selectedDifficulty) => {
+  const startChainGame = async (selectedDifficulty) => {
+    const mode = selectedChainMode;
+    const base = chainBase(mode);
     setDifficulty(selectedDifficulty);
     setShowDifficultySelect(false);
-    setGameMode('wordchain');
-    await fetch('http://localhost:8000/api/wordchain/restart/' + username, { method: 'POST' });
-    await fetchGameHistory();
-    connectWordChain(selectedDifficulty);
+    setGameMode(mode);
+    await fetch('http://localhost:8000/api/' + base + '/restart/' + username, { method: 'POST' });
+    await fetchGameHistory(mode);
+    connectChain(selectedDifficulty, mode);
   };
 
   const goBack = () => {
@@ -113,6 +121,7 @@ function App() {
     setSelectedGame(null);
     setChatSessions([]);
     setCurrentSessionId(null);
+    setGameMessages([]);
   };
 
   const logout = () => {
@@ -129,10 +138,85 @@ function App() {
       if (data.type === 'session_info') {
         setCurrentSessionId(data.session_id);
       } else if (data.type === 'history') {
-        setMessages(data.messages);
+        setMessages(data.messages || []);
       } else if (data.type === 'session_updated') {
         fetchChatSessions();
-      } else if (data.type === 'message' || data.type === 'system') {
+      } else if (data.type === 'ai_stream_start') {
+        setMessages((prev) => [
+          ...prev,
+          {
+            type: 'message',
+            username: 'AI',
+            message: '',
+            timestamp: new Date().toISOString(),
+            isStreaming: true,
+          },
+        ]);
+      } else if (data.type === 'ai_stream_chunk') {
+        setMessages((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].username === 'AI' && next[i].isStreaming) {
+              next[i] = {
+                ...next[i],
+                message: (next[i].message || '') + (data.delta || ''),
+              };
+              return next;
+            }
+          }
+
+          next.push({
+            type: 'message',
+            username: 'AI',
+            message: data.delta || '',
+            timestamp: new Date().toISOString(),
+            isStreaming: true,
+          });
+          return next;
+        });
+      } else if (data.type === 'ai_stream_end') {
+        setMessages((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].username === 'AI' && next[i].isStreaming) {
+              next[i] = {
+                ...next[i],
+                isStreaming: false,
+                message: data.message || next[i].message || '',
+                timestamp: data.timestamp || next[i].timestamp,
+              };
+              return next;
+            }
+          }
+
+          next.push({
+            type: 'message',
+            username: 'AI',
+            message: data.message || '',
+            timestamp: data.timestamp || new Date().toISOString(),
+            isStreaming: false,
+          });
+          return next;
+        });
+      } else if (data.type === 'system') {
+        setMessages((prev) => {
+          const next = [...prev];
+          if ((data.message || '').startsWith('AI 응답 오류:')) {
+            for (let i = next.length - 1; i >= 0; i -= 1) {
+              if (next[i].username === 'AI' && next[i].isStreaming) {
+                next[i] = {
+                  ...next[i],
+                  isStreaming: false,
+                  message: next[i].message || '(응답 실패)',
+                };
+                break;
+              }
+            }
+          }
+          next.push(data);
+          return next;
+        });
+      } else if (data.type === 'message') {
         setMessages((prev) => [...prev, data]);
       }
     };
@@ -140,9 +224,10 @@ function App() {
     setWs(websocket);
   };
 
-  const connectWordChain = (diff) => {
-    const websocket = new WebSocket('ws://localhost:8000/ws/wordchain/' + username + '/' + diff);
-    websocket.onopen = () => console.log('WordChain connected');
+  const connectChain = (diff, mode = gameMode) => {
+    const base = chainBase(mode);
+    const websocket = new WebSocket('ws://localhost:8000/ws/' + base + '/' + username + '/' + diff);
+    websocket.onopen = () => console.log('Chain game connected');
     websocket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'history') {
@@ -150,21 +235,31 @@ function App() {
       } else if (data.type === 'game_over') {
         setIsGameOver(true);
         setGameOverMessage(data.message);
-        fetchGameHistory();
+        fetchGameHistory(mode);
       } else if (data.type === 'score') {
         setScore(data.score);
       } else if (data.type === 'system') {
         // 에러 메시지 표시
         setWcErrorMessage(data.message);
         setTimeout(() => setWcErrorMessage(''), 3000);
+        setGameMessages((prev) => [...prev, data]);  // 시스템 메시지도 추가
       } else if (data.type === 'message') {
         setWcErrorMessage(''); // 성공하면 에러 메시지 클리어
-        const newWord = { word: data.message, isUser: data.username !== 'AI' };
-        setWordList((prev) => [...prev, newWord]);
-        setCurrentWord(data.message);
+        const isUserMessage = data.username !== 'AI';
+        setGameMessages((prev) => [...prev, data]);  // 게임 메시지 추가
+        // 해석은 wordList에 추가하지 않음
+        if (!data.message.startsWith('(')) {
+          const newWord = { word: data.message, isUser: isUserMessage };
+          setWordList((prev) => [...prev, newWord]);
+        }
+        if (mode === 'idiom') {
+          // idiom에서는 AI 메시지가 퀴즈이므로 currentWord 설정하지 않음
+        } else {
+          setCurrentWord(data.message);
+        }
       }
     };
-    websocket.onclose = () => console.log('WordChain disconnected');
+    websocket.onclose = () => console.log('Chain game disconnected');
     setWordChainWs(websocket);
   };
 
@@ -240,15 +335,16 @@ function App() {
 
   const restartWordChain = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/wordchain/restart/' + username, { method: 'POST' });
+      const response = await fetch('http://localhost:8000/api/' + chainBase(gameMode) + '/restart/' + username, { method: 'POST' });
       if (response.ok) {
         setWordList([]);
         setCurrentWord('');
         setScore(0);
         setIsGameOver(false);
         setGameOverMessage('');
+        setGameMessages([]);
         if (wordChainWs) wordChainWs.close();
-        setTimeout(() => connectWordChain(difficulty), 100);
+        setTimeout(() => connectChain(difficulty, gameMode), 100);
       }
     } catch (error) {
       console.error('Failed to restart game:', error);
@@ -261,7 +357,7 @@ function App() {
     if (!window.confirm('이 게임 기록을 삭제할까요?')) return;
 
     try {
-      const response = await fetch(`http://localhost:8000/api/wordchain/history/${username}/${index}`, { method: 'DELETE' });
+      const response = await fetch(`http://localhost:8000/api/${chainBase(gameMode)}/history/${username}/${index}`, { method: 'DELETE' });
       if (response.ok) {
         await fetchGameHistory();
         if (selectedGame === index) {
@@ -283,11 +379,6 @@ function App() {
   const formatDate = (timestamp) => {
     const date = new Date(timestamp);
     return date.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  };
-
-  const getLastChar = (word) => {
-    if (!word) return '';
-    return word[word.length - 1];
   };
 
   const difficultyInfo = {
@@ -332,7 +423,7 @@ function App() {
                 key={level}
                 className={'diff-btn' + (difficulty === level ? ' selected' : '')}
                 style={{ '--diff-color': difficultyInfo[level].color }}
-                onClick={() => startWordChain(level)}
+                onClick={() => startChainGame(level)}
               >
                 <span className="diff-emoji">{difficultyInfo[level].emoji}</span>
                 <span className="diff-level">Lv.{level}</span>
@@ -364,6 +455,11 @@ function App() {
               <span className="mode-icon">🎮</span>
               <span className="mode-title">끝말잇기</span>
               <span className="mode-desc">AI와 끝말잇기 대결!</span>
+            </button>
+            <button className="mode-btn idiom-mode" onClick={() => selectMode('idiom')}>
+              <span className="mode-icon">📜</span>
+              <span className="mode-title">사자성어</span>
+              <span className="mode-desc">AI와 사자성어 이어말하기</span>
             </button>
           </div>
         </div>
@@ -430,7 +526,10 @@ function App() {
                   <>
                     {msg.username !== username && <span className="username">{msg.username}</span>}
                     <div className="message-content">
-                      <span className="text">{msg.message}</span>
+                      <span className={'text' + (msg.isStreaming ? ' streaming' : '')}>
+                        {msg.message || ''}
+                        {msg.isStreaming && <span className="stream-dots"><span></span><span></span><span></span></span>}
+                      </span>
                       <span className="time">{formatTime(msg.timestamp)}</span>
                     </div>
                   </>
@@ -449,13 +548,13 @@ function App() {
   }
 
   // 끝말잇기 화면
-  if (gameMode === 'wordchain') {
+  if (gameMode === 'wordchain' || gameMode === 'idiom') {
     return (
       <div className="wc-page">
         {/* 사이드바 - 항상 고정 */}
         <div className="wc-sidebar">
           <div className="wc-sidebar-header">
-            <h3>게임 기록</h3>
+            <h3>{gameMode === 'idiom' ? '사자성어 기록' : '게임 기록'}</h3>
           </div>
           <div className="wc-sidebar-content">
             {gameHistory.length === 0 ? (
@@ -476,7 +575,7 @@ function App() {
                   </div>
                   <div className="wc-history-info">
                     <span className="wc-history-score">{game.score}점</span>
-                    <span className="wc-history-words">{game.words_count}단어</span>
+                    <span className="wc-history-words">{game.words_count}{gameMode === 'idiom' ? '문제' : '단어'}</span>
                     <span className="wc-history-diff" style={{ background: difficultyInfo[game.difficulty]?.color }}>
                       Lv.{game.difficulty}
                     </span>
@@ -510,7 +609,7 @@ function App() {
                   </span>
                 </div>
                 <div className="wc-modal-date">{formatDate(gameHistory[selectedGame].timestamp)}</div>
-                <div className="wc-modal-words-title">사용된 단어 ({gameHistory[selectedGame].words_count}개)</div>
+                <div className="wc-modal-words-title">사용된 {gameMode === 'idiom' ? '사자성어' : '단어'} ({gameHistory[selectedGame].words_count}개)</div>
                 <div className="wc-modal-words">
                   {gameHistory[selectedGame].words?.map((word, i) => (
                     <span key={i} className="wc-modal-word">{word}</span>
@@ -546,11 +645,11 @@ function App() {
             <div className="wc-word-list-wrapper">
               <div className="wc-word-list" ref={wordListRef}>
                 {wordList.length === 0 ? (
-                  <div className="wc-empty-list">단어가 여기에 표시됩니다</div>
+                  <div className="wc-empty-list">{gameMode === 'idiom' ? '문제가 여기에 표시됩니다' : '단어가 여기에 표시됩니다'}</div>
                 ) : (
                   wordList.map((item, index) => (
                     <span key={index} className={'wc-word ' + (item.isUser ? 'user' : 'ai')}>
-                      {item.word}
+                      {item.isUser ? item.word : (item.word.startsWith('(') ? <span className="wc-meaning">{item.word}</span> : item.word)}
                     </span>
                   ))
                 )}
@@ -559,20 +658,43 @@ function App() {
 
             {/* 현재 단어 크게 표시 */}
             <div className="wc-current-display">
-              {currentWord ? (
-                <>
-                  <div className="wc-big-word">{currentWord}</div>
-                  <div className="wc-next-hint">
-                    <span className="wc-next-char">{getLastChar(currentWord)}</span>
-                    <span>(으)로 시작하는 단어를 입력하세요!</span>
+              {(() => {
+                if (gameMode === 'idiom') {
+                  // idiom에서는 마지막 AI 메시지를 표시
+                  const nonMeaningWords = wordList.filter(w => !w.word.startsWith('('));
+                  const lastAIMessage = nonMeaningWords[nonMeaningWords.length - 1];
+                  if (lastAIMessage) {
+                    // 모든 해석 중 마지막 해석을 찾기
+                    const meanings = wordList.filter(w => w.word.startsWith('('));
+                    const lastMeaning = meanings[meanings.length - 1];
+                    return (
+                      <>
+                        <div className="wc-big-word">{lastAIMessage.word}</div>
+                        <div className="wc-next-hint">
+                          <span>뒷 두 글자를 입력하세요!</span>
+                          {lastMeaning && <div className="wc-meaning">{lastMeaning.word}</div>}
+                        </div>
+                      </>
+                    );
+                  }
+                } else if (currentWord) {
+                  return (
+                    <>
+                      <div className="wc-big-word">{currentWord}</div>
+                      <div className="wc-next-hint">
+                        <span className="wc-next-char">{getLastChar(currentWord)}</span>
+                        <span>(으)로 시작하는 단어를 입력하세요!</span>
+                      </div>
+                    </>
+                  );
+                }
+                return (
+                  <div className="wc-start-prompt">
+                    <div className="wc-start-emoji">🎯</div>
+                    <div>{gameMode === 'idiom' ? 'AI가 앞 두 글자를 내면, 뒤 두 글자를 맞혀보세요!' : '아무 단어나 입력해서 시작!'}</div>
                   </div>
-                </>
-              ) : (
-                <div className="wc-start-prompt">
-                  <div className="wc-start-emoji">🎯</div>
-                  <div>아무 단어나 입력해서 시작!</div>
-                </div>
-              )}
+                );
+              })()}
             </div>
 
             {/* 게임 오버 메시지 */}
@@ -595,7 +717,7 @@ function App() {
                 <input
                   type="text"
                   className="wc-text-input"
-                  placeholder={isGameOver ? "게임 종료!" : "단어 입력..."}
+                  placeholder={isGameOver ? '게임 종료!' : (gameMode === 'idiom' ? '뒷 두 글자 입력...' : '단어 입력...')}
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   disabled={isGameOver}

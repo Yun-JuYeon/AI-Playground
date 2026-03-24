@@ -1,1 +1,1 @@
-from . import chat, wordchain
+from . import chat, wordchain, idiom
